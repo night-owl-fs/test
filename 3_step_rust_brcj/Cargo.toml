@@ -1,0 +1,12 @@
+[package]
+name = "brcj_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+image = { version = "0.25", features = ["png", "jpeg"] }
+imageproc = "0.25"
+rayon = "1.10"
+indicatif = "0.17"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2.5"

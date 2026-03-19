@@ -1,0 +1,56 @@
+[
+  {
+    "icao": "KTPA",
+    "name": "Tampa Intl",
+    "base_z": 9,
+    "base_x": 137,
+    "base_y": 213,
+    "grid": 3,
+    "out_z": 13
+  },
+  {
+    "icao": "KTPA",
+    "name": "Tampa Intl",
+    "base_z": 9,
+    "base_x": 137,
+    "base_y": 213,
+    "grid": 3,
+    "out_z": 14
+  },
+  {
+    "icao": "KTPA",
+    "name": "Tampa Intl",
+    "base_z": 9,
+    "base_x": 137,
+    "base_y": 213,
+    "grid": 3,
+    "out_z": 15
+  },
+  {
+    "icao": "KTPA",
+    "name": "Tampa Intl",
+    "base_z": 11,
+    "base_x": 553,
+    "base_y": 857,
+    "grid": 3,
+    "out_z": 16
+  },
+  {
+    "icao": "KTPA",
+    "name": "Tampa Intl",
+    "base_z": 13,
+    "base_x": 2215,
+    "base_y": 3430,
+    "grid": 5,
+    "out_z": 17
+  },
+  {
+    "icao": "KTPA",
+    "name": "Tampa Intl",
+    "base_z": 13,
+    "base_x": 2216,
+    "base_y": 3431,
+    "grid": 3,
+    "out_z": 18
+  }
+]

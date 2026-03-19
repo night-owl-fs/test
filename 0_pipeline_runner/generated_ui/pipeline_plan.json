@@ -1,0 +1,202 @@
+{
+  "created_unix_secs": 1772703033,
+  "airports": [
+    "KLGA"
+  ],
+  "jobs_file": "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/airport_cones.json",
+  "download_manifest_file": "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/download_manifest.json",
+  "steps": [
+    {
+      "id": "1_step_airport_indexer",
+      "status": "wired",
+      "description": "Generate cone jobs from the airport database",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "step_airport_indexer",
+        "--bin",
+        "step_airport_indexer",
+        "--",
+        "--db",
+        "/Users/richavery/Desktop/BEAVERY/crates/1_step_airport_indexer/WW.ChartDataAOPA.sqlite",
+        "--icao",
+        "KLGA",
+        "--out-spec",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/airport_cones.json",
+        "--out-specs-dir",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/cone_specs"
+      ]
+    },
+    {
+      "id": "2_step_rust_downloader",
+      "status": "wired",
+      "description": "Expand jobs into per-tile download manifest",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "step_rust_downloader",
+        "--bin",
+        "step_rust_downloader",
+        "--",
+        "--spec",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/airport_cones.json",
+        "--out-manifest",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/download_manifest.json",
+        "--url-template",
+        "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "--download-root",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/tiles_raw",
+        "--workers",
+        "8"
+      ]
+    },
+    {
+      "id": "3_step_rust_brcj",
+      "status": "wired",
+      "description": "BRCJ image enhancement stage",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "brcj_rust",
+        "--bin",
+        "brcj_rust",
+        "--",
+        "--input",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/tiles_raw",
+        "--output",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/tiles_brcj",
+        "--zoom",
+        "18",
+        "--workers",
+        "8"
+      ]
+    },
+    {
+      "id": "4_step_pgw_rust",
+      "status": "wired",
+      "description": "Generate PGW sidecars for georeferencing",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "pgw_sidecar_maker",
+        "--",
+        "--input",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/tiles_brcj",
+        "--recursive"
+      ]
+    },
+    {
+      "id": "5_step_geotiff_to_heaven",
+      "status": "wired",
+      "description": "Build GeoTIFF mosaics from job specs",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "cone_to_heaven_rust",
+        "--",
+        "--jobs",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/airport_cones.json",
+        "--tiles-root",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/tiles_brcj",
+        "--out-dir",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/geotiff",
+        "--strict"
+      ]
+    },
+    {
+      "id": "6_step_rust_imagery_tiler",
+      "status": "wired",
+      "description": "Call Cesium imagery-tiler for GeoTIFF inputs",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "rust_imagery_tiler",
+        "--",
+        "--input-dir",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/geotiff",
+        "--output-db",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/imagery/imagery.gpkg",
+        "--print-command-file",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/imagery/imagery_tiler_command.txt"
+      ]
+    },
+    {
+      "id": "7_step_rust_adios_trim",
+      "status": "wired",
+      "description": "Re-encode tile blobs for optimized database size",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "rust_trim_job",
+        "--",
+        "--input",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/imagery/imagery.gpkg",
+        "--output",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/imagery/imagery_trim.gpkg",
+        "--quality",
+        "90",
+        "--force"
+      ]
+    },
+    {
+      "id": "8_step_merge_tiles",
+      "status": "wired",
+      "description": "Merge optimized tile databases",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "merge_tiles_rust",
+        "--",
+        "--inputs",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/imagery/imagery.gpkg",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/imagery/imagery_trim.gpkg",
+        "--output",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/imagery/imagery_merged.gpkg",
+        "--force"
+      ]
+    },
+    {
+      "id": "9_step_move_sqls",
+      "status": "wired",
+      "description": "Move/copy final SQL artifacts into final folder",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "move_sqls_rust",
+        "--",
+        "--input-dir",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/imagery",
+        "--output-dir",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/final",
+        "--copy",
+        "--report",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/final/move_sqls_report.json"
+      ]
+    },
+    {
+      "id": "10_step_generative_fix",
+      "status": "experimental",
+      "description": "Generate missing-tile repair plan",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "generative_fix_rust",
+        "--",
+        "--tiles-root",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/tiles_brcj",
+        "--out-plan",
+        "/Users/richavery/Desktop/BEAVERY/crates/0_pipeline_runner/generated_ui/generative/repair_plan.json"
+      ]
+    }
+  ]
+}

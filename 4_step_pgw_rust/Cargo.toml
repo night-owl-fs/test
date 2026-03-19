@@ -1,0 +1,11 @@
+[package]
+name = "pgw_sidecar_maker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+walkdir = "2"
+rayon = "1"
+anyhow = "1"

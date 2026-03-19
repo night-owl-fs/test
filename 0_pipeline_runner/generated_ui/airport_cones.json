@@ -1,0 +1,56 @@
+[
+  {
+    "icao": "KLGA",
+    "name": "Laguardia",
+    "base_z": 9,
+    "base_x": 149,
+    "base_y": 191,
+    "grid": 3,
+    "out_z": 13
+  },
+  {
+    "icao": "KLGA",
+    "name": "Laguardia",
+    "base_z": 9,
+    "base_x": 149,
+    "base_y": 191,
+    "grid": 3,
+    "out_z": 14
+  },
+  {
+    "icao": "KLGA",
+    "name": "Laguardia",
+    "base_z": 9,
+    "base_x": 149,
+    "base_y": 191,
+    "grid": 3,
+    "out_z": 15
+  },
+  {
+    "icao": "KLGA",
+    "name": "Laguardia",
+    "base_z": 11,
+    "base_x": 602,
+    "base_y": 768,
+    "grid": 3,
+    "out_z": 16
+  },
+  {
+    "icao": "KLGA",
+    "name": "Laguardia",
+    "base_z": 13,
+    "base_x": 2412,
+    "base_y": 3076,
+    "grid": 5,
+    "out_z": 17
+  },
+  {
+    "icao": "KLGA",
+    "name": "Laguardia",
+    "base_z": 13,
+    "base_x": 2413,
+    "base_y": 3077,
+    "grid": 3,
+    "out_z": 18
+  }
+]

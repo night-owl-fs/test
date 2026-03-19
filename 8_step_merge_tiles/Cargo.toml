@@ -1,0 +1,10 @@
+[package]
+name = "merge_tiles_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = true }
+rusqlite = { version = "0.31", features = ["bundled"] }

@@ -1,0 +1,20 @@
+imagery-tiler.exe ^
+-i ^
+"C:\Users\ravery\Desktop\world\0000.tif" ^
+"C:\Users\ravery\Desktop\world\0001.tif" ^
+"C:\Users\ravery\Desktop\world\0002.tif" ^
+"C:\Users\ravery\Desktop\world\0003.tif" ^
+"C:\Users\ravery\Desktop\world\0004.tif" ^
+"C:\Users\ravery\Desktop\world\0005.tif" ^
+"C:\Users\ravery\Desktop\world\0006.tif" ^
+"C:\Users\ravery\Desktop\world\0007.tif" ^
+"C:\Users\ravery\Desktop\world\0008.tif" ^
+"C:\Users\ravery\Desktop\world\0009.tif" ^
+-f ^
+GEOPACKAGE ^
+-o ^
+"C:\Users\ravery\Desktop\world_global.geopackage" ^
+--max-zoom-level-limit ^
+13 ^
+--working-directory ^
+"C:\Users\ravery\Desktop\temp_working"
