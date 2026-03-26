@@ -7,10 +7,11 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use pipeline_core::{
     build_airport_cone_to_heaven_report, build_download_manifest, render_cone_spec_text, ConeJob,
-    DownloadManifest,
+    DownloadManifest, ProgressReporter, StepTimer,
 };
 use rayon::prelude::*;
 use reqwest::blocking::Client;
+use step_rust_downloader::{normalize_download_manifest_to_png, write_png_file};
 
 #[derive(Parser, Debug)]
 #[command(name = "step_rust_downloader")]
@@ -41,10 +42,7 @@ struct Args {
     out_specs_dir: Option<PathBuf>,
 
     /// Tile URL template
-    #[arg(
-        long,
-        default_value = "https://tiles.example.invalid/{z}/{x}/{y}.png"
-    )]
+    #[arg(long, default_value = "https://tiles.example.invalid/{z}/{x}/{y}.png")]
     url_template: String,
 
     /// Download tile bytes into this folder if set
@@ -75,8 +73,8 @@ struct Args {
 fn read_jobs_from_spec(path: &Path) -> Result<Vec<ConeJob>> {
     let text =
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let jobs: Vec<ConeJob> =
-        serde_json::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
+    let jobs: Vec<ConeJob> = serde_json::from_str(&text)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(jobs)
 }
 
@@ -146,7 +144,17 @@ fn write_manifest(args: &Args, jobs: &[ConeJob]) -> Result<DownloadManifest> {
 }
 
 fn maybe_download(args: &Args, manifest: &DownloadManifest) -> Result<()> {
+    let total_items = manifest.items.len().max(1);
+    let progress = ProgressReporter::new(2, "2_step_rust_downloader", total_items);
+    progress.start(Some("Preparing download stage".to_string()));
+
     let Some(download_root) = &args.download_root else {
+        progress.finish(
+            manifest.items.len(),
+            Some(total_items),
+            0,
+            Some("Manifest ready; download stage skipped".to_string()),
+        );
         return Ok(());
     };
 
@@ -164,6 +172,7 @@ fn maybe_download(args: &Args, manifest: &DownloadManifest) -> Result<()> {
     let downloaded = AtomicUsize::new(0);
     let skipped_existing = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
+    let processed = AtomicUsize::new(0);
 
     manifest.items.par_iter().for_each(|item| {
         let target = download_root.join(&item.relative_path);
@@ -171,17 +180,44 @@ fn maybe_download(args: &Args, manifest: &DownloadManifest) -> Result<()> {
 
         if args.resume && target.exists() {
             skipped_existing.fetch_add(1, Ordering::Relaxed);
+            let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+            if done == manifest.items.len() || done % 250 == 0 {
+                progress.update(
+                    done,
+                    Some(total_items),
+                    failed.load(Ordering::Relaxed),
+                    Some("Downloading tiles".to_string()),
+                );
+            }
             return;
         }
 
         if args.dry_run {
             downloaded.fetch_add(1, Ordering::Relaxed);
+            let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+            if done == manifest.items.len() || done % 250 == 0 {
+                progress.update(
+                    done,
+                    Some(total_items),
+                    failed.load(Ordering::Relaxed),
+                    Some("Dry-run download progress".to_string()),
+                );
+            }
             return;
         }
 
         if let Some(parent) = target.parent() {
             if fs::create_dir_all(parent).is_err() {
                 failed.fetch_add(1, Ordering::Relaxed);
+                let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                if done == manifest.items.len() || done % 250 == 0 {
+                    progress.update(
+                        done,
+                        Some(total_items),
+                        failed.load(Ordering::Relaxed),
+                        Some("Downloading tiles".to_string()),
+                    );
+                }
                 return;
             }
         }
@@ -199,7 +235,7 @@ fn maybe_download(args: &Args, manifest: &DownloadManifest) -> Result<()> {
             let Ok(bytes) = bytes else {
                 continue;
             };
-            if fs::write(&target, &bytes).is_ok() {
+            if write_png_file(&target, &bytes).is_ok() {
                 success = true;
                 break;
             }
@@ -208,6 +244,16 @@ fn maybe_download(args: &Args, manifest: &DownloadManifest) -> Result<()> {
             downloaded.fetch_add(1, Ordering::Relaxed);
         } else {
             failed.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+        if done == manifest.items.len() || done % 250 == 0 {
+            progress.update(
+                done,
+                Some(total_items),
+                failed.load(Ordering::Relaxed),
+                Some("Downloading tiles".to_string()),
+            );
         }
     });
 
@@ -220,13 +266,77 @@ fn maybe_download(args: &Args, manifest: &DownloadManifest) -> Result<()> {
     );
     println!("failed={}", failed.load(Ordering::Relaxed));
 
+    if !args.dry_run {
+        progress.update(
+            manifest.items.len(),
+            Some(total_items),
+            failed.load(Ordering::Relaxed),
+            Some("Converting downloaded files to PNG".to_string()),
+        );
+
+        let png_report = normalize_download_manifest_to_png(download_root, manifest);
+        println!("PNG conversion summary");
+        println!("converted={}", png_report.converted);
+        println!("missing={}", png_report.missing);
+        println!("failed={}", png_report.failed);
+
+        if !png_report.sample_errors.is_empty() {
+            for error in &png_report.sample_errors {
+                eprintln!("PNG conversion issue: {error}");
+            }
+        }
+
+        if png_report.missing > 0 || png_report.failed > 0 {
+            progress.finish(
+                manifest.items.len(),
+                Some(total_items),
+                failed.load(Ordering::Relaxed) + png_report.missing + png_report.failed,
+                Some("Download stage finished with PNG conversion errors".to_string()),
+            );
+            return Err(anyhow!(
+                "PNG conversion incomplete: converted={} missing={} failed={}",
+                png_report.converted,
+                png_report.missing,
+                png_report.failed
+            ));
+        }
+
+        println!(
+            "[PNG-CONVERSION] All {} tile files were converted and verified as PNG in {}",
+            png_report.converted,
+            download_root.display()
+        );
+    }
+
+    progress.finish(
+        manifest.items.len(),
+        Some(total_items),
+        failed.load(Ordering::Relaxed),
+        Some("Download stage complete".to_string()),
+    );
+
     Ok(())
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let timing_root = args
+        .download_root
+        .clone()
+        .or_else(|| args.out_manifest.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let timer = StepTimer::new(2, "2_step_rust_downloader", timing_root);
     let jobs = prepare_jobs(&args)?;
     let manifest = write_manifest(&args, &jobs)?;
     maybe_download(&args, &manifest)?;
+    let _ = timer.finish(
+        Some(jobs.len()),
+        Some(manifest.tile_count),
+        Some(0),
+        format!(
+            "Manifest built for {} airports and {} tiles",
+            manifest.airport_count, manifest.tile_count
+        ),
+    )?;
     Ok(())
 }

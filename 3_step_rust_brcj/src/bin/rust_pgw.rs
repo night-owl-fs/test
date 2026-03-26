@@ -88,7 +88,11 @@ fn main() {
     let mut errors = 0usize;
 
     if cli.recursive {
-        for entry in WalkDir::new(&root).follow_links(true).into_iter().filter_map(Result::ok) {
+        for entry in WalkDir::new(&root)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             let p = entry.path();
             if !entry.file_type().is_file() || !should_process_png(p) {
                 continue;

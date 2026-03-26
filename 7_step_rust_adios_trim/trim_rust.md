@@ -1,7 +1,7 @@
 # trim_rust
 
 ## Goal
-Rust replacement for `adios_mfer_trim_job.py` that converts GeoPackage tile blobs from PNG to JPG while preserving schema/metadata.
+Rust-first replacement for `adios_mfer_trim_job.py` that converts GeoPackage/SQLite tile blobs from PNG to JPG while preserving schema/metadata.
 
 ## Scope
 - Input: one `.sqlite`/GeoPackage tile DB.
@@ -13,13 +13,15 @@ Rust replacement for `adios_mfer_trim_job.py` that converts GeoPackage tile blob
 
 ## CLI Proposal
 ```bash
-trim_rust \
+cargo run -p rust_trim_job -- \
   --input C:\\path\\KASE_Z18_no_overlap.sqlite \
   --output C:\\path\\KASE_Z18_no_overlap_trim.sqlite \
   --quality 90 \
   --background 0,0,0 \
   --min-zoom 6 \
   --max-zoom 19 \
+  --skip-fully-transparent \
+  --skip-any-alpha \
   --force
 ```
 
@@ -30,6 +32,8 @@ trim_rust \
 - Batch insert for speed.
 - Print progress with rows/sec and ETA.
 - Return non-zero on conversion failure.
+- Composite alpha tiles onto a configurable background when alpha is allowed.
+- Skip fully transparent tiles or any-alpha tiles when requested.
 
 ## Recommended Crates
 - `rusqlite`
@@ -38,5 +42,5 @@ trim_rust \
 - `anyhow`
 
 ## Status
-- Current production path still uses `adios_mfer_trim_job.py`.
-- This doc is the build spec for a Rust parity implementation.
+- `rust_trim_job` is now the default implementation for step 7.
+- `adios_mfer_trim_job.py` remains as a fallback/reference path if troubleshooting requires the legacy flow.

@@ -1,10 +1,12 @@
 use clap::{ArgGroup, Parser};
-use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage, ImageReader};
+use image::{DynamicImage, ImageBuffer, ImageReader, Rgba, RgbaImage};
 use imageproc::filter::gaussian_blur_f32;
 use indicatif::{ProgressBar, ProgressStyle};
+use pipeline_core::{ProgressReporter, StepTimer};
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use walkdir::WalkDir;
 
 /// BRCJ "BABE RUTH CRAZY JEFF" darkener in Rust
@@ -206,10 +208,18 @@ fn apply_curve_luma(img: &mut RgbaImage, params: &BrParameters) {
         let l = 0.299 * r + 0.587 * g + 0.114 * b;
 
         let y = if l <= x1 {
-            let t = if x1 - x0 == 0.0 { 0.0 } else { (l - x0) / (x1 - x0) };
+            let t = if x1 - x0 == 0.0 {
+                0.0
+            } else {
+                (l - x0) / (x1 - x0)
+            };
             lerp(y0, y1, t)
         } else {
-            let t = if x2 - x1 == 0.0 { 0.0 } else { (l - x1) / (x2 - x1) };
+            let t = if x2 - x1 == 0.0 {
+                0.0
+            } else {
+                (l - x1) / (x2 - x1)
+            };
             lerp(y1, y2, t)
         };
 
@@ -263,7 +273,11 @@ fn apply_gaussian_blur(img: &RgbaImage, radius: f32) -> RgbaImage {
 
 fn apply_exposure_and_gamma(img: &mut RgbaImage, params: &BrParameters) {
     let offset = params.exposure_offset;
-    let gamma = if params.gamma == 0.0 { 1.0 } else { params.gamma };
+    let gamma = if params.gamma == 0.0 {
+        1.0
+    } else {
+        params.gamma
+    };
 
     for p in img.pixels_mut() {
         for c in 0..3 {
@@ -351,7 +365,11 @@ fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         return (0.0, 0.0, l);
     }
     let d = max - min;
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
     let h = if max == r {
         ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
     } else if max == g {
@@ -386,7 +404,11 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     if s == 0.0 {
         return (l, l, l);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
     let g = hue_to_rgb(p, q, h);
@@ -581,6 +603,7 @@ fn is_image_file(path: &Path) -> bool {
 
 fn main() {
     let cli = Cli::parse();
+    let timer = StepTimer::new(3, "3_step_rust_brcj", cli.output.clone());
 
     if let Some(w) = cli.workers {
         rayon::ThreadPoolBuilder::new()
@@ -621,6 +644,10 @@ fn main() {
         .unwrap()
         .progress_chars("#>-"),
     );
+    let progress = ProgressReporter::new(3, "3_step_rust_brcj", files.len().max(1));
+    progress.start(Some("Processing BRCJ tiles".to_string()));
+    let completed = AtomicUsize::new(0);
+    let errors = AtomicUsize::new(0);
 
     files.par_iter().for_each(|src_path| {
         let rel = src_path.strip_prefix(&cli.input).unwrap_or(src_path);
@@ -628,13 +655,32 @@ fn main() {
 
         if !cli.overwrite && out_path.exists() {
             pb.inc(1);
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            if done == files.len() || done % 250 == 0 {
+                progress.update(
+                    done,
+                    Some(files.len().max(1)),
+                    errors.load(Ordering::Relaxed),
+                    Some("Processing BRCJ tiles".to_string()),
+                );
+            }
             return;
         }
 
         if let Some(parent) = out_path.parent() {
             if let Err(err) = fs::create_dir_all(parent) {
                 eprintln!("Failed to create dir {}: {}", parent.display(), err);
+                errors.fetch_add(1, Ordering::Relaxed);
                 pb.inc(1);
+                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if done == files.len() || done % 250 == 0 {
+                    progress.update(
+                        done,
+                        Some(files.len().max(1)),
+                        errors.load(Ordering::Relaxed),
+                        Some("Processing BRCJ tiles".to_string()),
+                    );
+                }
                 return;
             }
         }
@@ -652,15 +698,42 @@ fn main() {
                 let processed = process_image(img, &params);
                 if let Err(err) = processed.save(&out_path) {
                     eprintln!("Failed to save {}: {}", out_path.display(), err);
+                    errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(err) => {
                 eprintln!("Failed to open {}: {}", src_path.display(), err);
+                errors.fetch_add(1, Ordering::Relaxed);
             }
         }
 
         pb.inc(1);
+        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+        if done == files.len() || done % 250 == 0 {
+            progress.update(
+                done,
+                Some(files.len().max(1)),
+                errors.load(Ordering::Relaxed),
+                Some("Processing BRCJ tiles".to_string()),
+            );
+        }
     });
 
     pb.finish_with_message("BRCJ pass complete.");
+    progress.finish(
+        files.len(),
+        Some(files.len().max(1)),
+        errors.load(Ordering::Relaxed),
+        Some("BRCJ pass complete".to_string()),
+    );
+    let _ = timer.finish(
+        Some(files.len()),
+        Some(files.len().saturating_sub(errors.load(Ordering::Relaxed))),
+        Some(errors.load(Ordering::Relaxed)),
+        format!(
+            "Processed {} tiles into {}",
+            files.len(),
+            cli.output.display()
+        ),
+    );
 }

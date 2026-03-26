@@ -6,9 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
+use cone_to_heaven_rust::expected_geotiff_output_count;
+use move_sqls_rust::MoveRecord;
 use pipeline_core::{
-    build_airport_index_report, build_download_manifest, default_cone_profiles, ConeJob,
-    DownloadManifest,
+    build_airport_index_report, build_download_manifest, default_beavery_data_root,
+    default_cone_profiles, ConeJob, DownloadManifest, ProgressReporter, StepTimer,
+    StepTimingRecord,
 };
 use pipeline_runner::{PipelinePlan, PipelineStepPlan};
 use walkdir::WalkDir;
@@ -44,10 +47,7 @@ struct PrepareArgs {
     #[arg(long, default_value_t = 2)]
     five_by_five_radius: i32,
 
-    #[arg(
-        long,
-        default_value = "https://tiles.example.invalid/{z}/{x}/{y}.png"
-    )]
+    #[arg(long, default_value = "https://tiles.example.invalid/{z}/{x}/{y}.png")]
     url_template: String,
 
     #[arg(long)]
@@ -86,6 +86,9 @@ struct PipelinePaths {
     pipeline_lock_file: PathBuf,
     state_csv: PathBuf,
     context_txt: PathBuf,
+    totals_csv: PathBuf,
+    totals_txt: PathBuf,
+    run_summary_txt: PathBuf,
     jobs_file: PathBuf,
     manifest_file: PathBuf,
     plan_file: PathBuf,
@@ -96,7 +99,7 @@ struct PipelinePaths {
     imagery_db: PathBuf,
     imagery_trim_db: PathBuf,
     imagery_merge_db: PathBuf,
-    final_dir: PathBuf,
+    move_sqls_report: PathBuf,
     generative_plan: PathBuf,
 }
 
@@ -106,6 +109,7 @@ struct PreparedRun {
     paths: PipelinePaths,
     expected_job_count: usize,
     expected_tile_count: usize,
+    prepare_timing: StepTimingRecord,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -164,8 +168,6 @@ fn derive_paths(out_dir: &Path) -> PipelinePaths {
     let state_dir = out_dir.join("state");
     let step_state_dir = state_dir.join("steps");
     let imagery_dir = out_dir.join("imagery");
-    let final_dir = out_dir.join("final");
-
     PipelinePaths {
         out_dir: out_dir.to_path_buf(),
         state_dir: state_dir.clone(),
@@ -173,17 +175,20 @@ fn derive_paths(out_dir: &Path) -> PipelinePaths {
         pipeline_lock_file: state_dir.join("pipeline.lock"),
         state_csv: state_dir.join("pipeline_state.csv"),
         context_txt: state_dir.join("pipeline_context.txt"),
+        totals_csv: state_dir.join("pipeline_totals.csv"),
+        totals_txt: state_dir.join("pipeline_totals.txt"),
+        run_summary_txt: state_dir.join("pipeline_run_summary.txt"),
         jobs_file: out_dir.join("airport_cones.json"),
         manifest_file: out_dir.join("download_manifest.json"),
         plan_file: out_dir.join("pipeline_plan.json"),
         raw_tiles_dir: out_dir.join("tiles_raw"),
         brcj_dir: out_dir.join("tiles_brcj"),
         geotiff_dir: out_dir.join("geotiff"),
-        imagery_db: imagery_dir.join("imagery.gpkg"),
-        imagery_trim_db: imagery_dir.join("imagery_trim.gpkg"),
-        imagery_merge_db: imagery_dir.join("imagery_merged.gpkg"),
+        imagery_db: imagery_dir.join("imagery.sqlite"),
+        imagery_trim_db: imagery_dir.join("imagery_trim.sqlite"),
+        imagery_merge_db: imagery_dir.join("imagery_merged.sqlite"),
         imagery_dir,
-        final_dir: final_dir.clone(),
+        move_sqls_report: state_dir.join("step9_move_sqls_report.json"),
         generative_plan: out_dir.join("generative").join("repair_plan.json"),
     }
 }
@@ -304,12 +309,14 @@ fn build_step_plan(paths: &PipelinePaths, args: &PrepareArgs) -> Result<Pipeline
             status: "wired".to_string(),
             description: "Generate cone jobs from the airport database".to_string(),
             command: step1_cmd,
+            fallback_command: None,
         },
         PipelineStepPlan {
             id: "2_step_rust_downloader".to_string(),
             status: "wired".to_string(),
             description: "Expand jobs into per-tile download manifest".to_string(),
             command: step2_cmd,
+            fallback_command: None,
         },
         PipelineStepPlan {
             id: "3_step_rust_brcj".to_string(),
@@ -338,6 +345,7 @@ fn build_step_plan(paths: &PipelinePaths, args: &PrepareArgs) -> Result<Pipeline
                 }
                 cmd
             },
+            fallback_command: None,
         },
         PipelineStepPlan {
             id: "4_step_pgw_rust".to_string(),
@@ -359,18 +367,21 @@ fn build_step_plan(paths: &PipelinePaths, args: &PrepareArgs) -> Result<Pipeline
                 }
                 cmd
             },
+            fallback_command: None,
         },
         PipelineStepPlan {
             id: "5_step_geotiff_to_heaven".to_string(),
             status: "wired".to_string(),
             description: "Build GeoTIFF mosaics from job specs".to_string(),
             command: step5_cmd,
+            fallback_command: None,
         },
         PipelineStepPlan {
             id: "6_step_rust_imagery_tiler".to_string(),
             status: "wired".to_string(),
             description: "Call Cesium imagery-tiler for GeoTIFF inputs".to_string(),
             command: step6_cmd,
+            fallback_command: None,
         },
         PipelineStepPlan {
             id: "7_step_rust_adios_trim".to_string(),
@@ -390,6 +401,15 @@ fn build_step_plan(paths: &PipelinePaths, args: &PrepareArgs) -> Result<Pipeline
                 "90".to_string(),
                 "--force".to_string(),
             ],
+            fallback_command: Some(vec![
+                "python3".to_string(),
+                "crates/7_step_rust_adios_trim/adios_mfer_trim_job.py".to_string(),
+                paths.imagery_db.display().to_string(),
+                paths.imagery_trim_db.display().to_string(),
+                "--quality".to_string(),
+                "90".to_string(),
+                "--force".to_string(),
+            ]),
         },
         PipelineStepPlan {
             id: "8_step_merge_tiles".to_string(),
@@ -408,6 +428,15 @@ fn build_step_plan(paths: &PipelinePaths, args: &PrepareArgs) -> Result<Pipeline
                 paths.imagery_merge_db.display().to_string(),
                 "--force".to_string(),
             ],
+            fallback_command: Some(vec![
+                "python3".to_string(),
+                "crates/8_step_merge_tiles/merge_tiles_v2.py".to_string(),
+                paths.imagery_db.display().to_string(),
+                paths.imagery_trim_db.display().to_string(),
+                "-o".to_string(),
+                paths.imagery_merge_db.display().to_string(),
+                "--force".to_string(),
+            ]),
         },
         PipelineStepPlan {
             id: "9_step_move_sqls".to_string(),
@@ -421,22 +450,18 @@ fn build_step_plan(paths: &PipelinePaths, args: &PrepareArgs) -> Result<Pipeline
                 "--".to_string(),
                 "--input-dir".to_string(),
                 paths.imagery_dir.display().to_string(),
-                "--output-dir".to_string(),
-                paths.final_dir.display().to_string(),
                 "--copy".to_string(),
                 "--report".to_string(),
-                paths
-                    .final_dir
-                    .join("move_sqls_report.json")
-                    .display()
-                    .to_string(),
+                paths.move_sqls_report.display().to_string(),
             ],
+            fallback_command: None,
         },
         PipelineStepPlan {
             id: "10_step_generative_fix".to_string(),
             status: "experimental".to_string(),
             description: "Generate missing-tile repair plan".to_string(),
             command: step10_cmd,
+            fallback_command: None,
         },
     ];
 
@@ -452,10 +477,255 @@ fn build_step_plan(paths: &PipelinePaths, args: &PrepareArgs) -> Result<Pipeline
     })
 }
 
-fn prepare_pipeline(args: &PrepareArgs) -> Result<PreparedRun> {
+fn step_number_from_id(step_id: &str) -> u32 {
+    step_id
+        .split('_')
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn documents_run_root(run_id: &str) -> PathBuf {
+    default_beavery_data_root().join("runs").join(run_id)
+}
+
+fn copy_if_exists(source: &Path, target: &Path) -> Result<()> {
+    if !source.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, target).with_context(|| {
+        format!(
+            "Failed to copy artifact {} -> {}",
+            source.display(),
+            target.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sync_artifacts_to_documents(paths: &PipelinePaths, run_id: &str) -> Result<()> {
+    let run_root = documents_run_root(run_id);
+    fs::create_dir_all(&run_root)?;
+    copy_if_exists(&paths.jobs_file, &run_root.join("airport_cones.json"))?;
+    copy_if_exists(
+        &paths.manifest_file,
+        &run_root.join("download_manifest.json"),
+    )?;
+    copy_if_exists(&paths.plan_file, &run_root.join("pipeline_plan.json"))?;
+    copy_if_exists(
+        &paths.state_csv,
+        &run_root.join("state").join("pipeline_state.csv"),
+    )?;
+    copy_if_exists(
+        &paths.context_txt,
+        &run_root.join("state").join("pipeline_context.txt"),
+    )?;
+    copy_if_exists(
+        &paths.totals_csv,
+        &run_root.join("state").join("pipeline_totals.csv"),
+    )?;
+    copy_if_exists(
+        &paths.totals_txt,
+        &run_root.join("state").join("pipeline_totals.txt"),
+    )?;
+    copy_if_exists(
+        &paths.run_summary_txt,
+        &run_root.join("state").join("pipeline_run_summary.txt"),
+    )?;
+    copy_if_exists(
+        &paths.move_sqls_report,
+        &run_root.join("state").join("step9_move_sqls_report.json"),
+    )?;
+
+    if paths.step_state_dir.exists() {
+        for entry in WalkDir::new(&paths.step_state_dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let relative = entry
+                .path()
+                .strip_prefix(&paths.state_dir)
+                .unwrap_or(entry.path());
+            copy_if_exists(entry.path(), &run_root.join("state").join(relative))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn append_total_row(
+    csv_path: &Path,
+    run_id: &str,
+    airports: &[String],
+    total_id: &str,
+    status: &str,
+    elapsed_ms: u128,
+    note: &str,
+) -> Result<()> {
+    let file_exists = csv_path.exists();
+    if let Some(parent) = csv_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(csv_path)
+        .with_context(|| format!("Failed to open {}", csv_path.display()))?;
+
+    if !file_exists {
+        writeln!(
+            file,
+            "timestamp_unix,run_id,airports,total_id,status,elapsed_ms,elapsed_seconds,note"
+        )?;
+    }
+
+    writeln!(
+        file,
+        "{},{},{},{},{},{},{:.3},{}",
+        now_unix_secs(),
+        csv_escape(run_id),
+        csv_escape(&airports.join("|")),
+        csv_escape(total_id),
+        csv_escape(status),
+        elapsed_ms,
+        elapsed_ms as f64 / 1000.0,
+        csv_escape(note),
+    )?;
+    Ok(())
+}
+
+fn sum_completed_step_range(timings: &[StepTimingRecord], max_step: u32) -> (u128, bool) {
+    let mut elapsed_ms = 0u128;
+    for record in timings
+        .iter()
+        .filter(|record| record.status == "completed" && record.step_number <= max_step)
+    {
+        elapsed_ms += record.elapsed_ms;
+    }
+
+    let complete = (0..=max_step).all(|step_number| {
+        timings
+            .iter()
+            .any(|record| record.step_number == step_number && record.status == "completed")
+    });
+
+    (elapsed_ms, complete)
+}
+
+fn write_pipeline_totals(
+    paths: &PipelinePaths,
+    run_id: &str,
+    airports: &[String],
+    timings: &[StepTimingRecord],
+) -> Result<()> {
+    let (elapsed_0_6_ms, complete_0_6) = sum_completed_step_range(timings, 6);
+    let (elapsed_0_9_ms, complete_0_9) = sum_completed_step_range(timings, 9);
+    let (elapsed_0_10_ms, complete_0_10) = sum_completed_step_range(timings, 10);
+
+    let total_lines = vec![
+        format!("run_id={run_id}"),
+        format!("airports={}", airports.join(",")),
+        format!(
+            "documents_data_dir={}",
+            default_beavery_data_root().display()
+        ),
+        format!("total_0_6_elapsed_ms={elapsed_0_6_ms}"),
+        format!(
+            "total_0_6_elapsed_seconds={:.3}",
+            elapsed_0_6_ms as f64 / 1000.0
+        ),
+        format!("total_0_6_complete={complete_0_6}"),
+        format!("completed_airport_sqlite={}", paths.imagery_db.display()),
+        format!("total_0_9_elapsed_ms={elapsed_0_9_ms}"),
+        format!(
+            "total_0_9_elapsed_seconds={:.3}",
+            elapsed_0_9_ms as f64 / 1000.0
+        ),
+        format!("total_0_9_complete={complete_0_9}"),
+        format!("total_0_10_elapsed_ms={elapsed_0_10_ms}"),
+        format!(
+            "total_0_10_elapsed_seconds={:.3}",
+            elapsed_0_10_ms as f64 / 1000.0
+        ),
+        format!("total_0_10_complete={complete_0_10}"),
+    ];
+    fs::write(&paths.totals_txt, format!("{}\n", total_lines.join("\n")))?;
+
+    append_total_row(
+        &paths.totals_csv,
+        run_id,
+        airports,
+        "steps_0_6_completed_airport",
+        if complete_0_6 { "completed" } else { "partial" },
+        elapsed_0_6_ms,
+        "Sum of completed step timers from 0 through 6",
+    )?;
+    append_total_row(
+        &paths.totals_csv,
+        run_id,
+        airports,
+        "steps_0_9_pipeline",
+        if complete_0_9 { "completed" } else { "partial" },
+        elapsed_0_9_ms,
+        "Sum of completed step timers from 0 through 9",
+    )?;
+    append_total_row(
+        &paths.totals_csv,
+        run_id,
+        airports,
+        "steps_0_10_pipeline",
+        if complete_0_10 {
+            "completed"
+        } else {
+            "partial"
+        },
+        elapsed_0_10_ms,
+        "Sum of completed step timers from 0 through 10",
+    )?;
+
+    Ok(())
+}
+
+fn write_run_summary_txt(
+    paths: &PipelinePaths,
+    run_id: &str,
+    airports: &[String],
+    completed_steps: &[String],
+    skipped_steps: &[String],
+    failed_step: Option<&str>,
+) -> Result<()> {
+    let mut lines = Vec::new();
+    lines.push(format!("run_id={run_id}"));
+    lines.push(format!("airports={}", airports.join(",")));
+    lines.push(format!("out_dir={}", paths.out_dir.display()));
+    lines.push(format!(
+        "documents_data_dir={}",
+        default_beavery_data_root().display()
+    ));
+    lines.push(format!("jobs_file={}", paths.jobs_file.display()));
+    lines.push(format!("manifest_file={}", paths.manifest_file.display()));
+    lines.push(format!("state_csv={}", paths.state_csv.display()));
+    lines.push(format!("totals_csv={}", paths.totals_csv.display()));
+    lines.push(format!("totals_txt={}", paths.totals_txt.display()));
+    lines.push(format!("completed_steps={}", completed_steps.join(",")));
+    lines.push(format!("skipped_steps={}", skipped_steps.join(",")));
+    lines.push(format!("failed_step={}", failed_step.unwrap_or("")));
+    fs::write(&paths.run_summary_txt, format!("{}\n", lines.join("\n")))?;
+    Ok(())
+}
+
+fn prepare_pipeline(args: &PrepareArgs, run_id: &str) -> Result<PreparedRun> {
     fs::create_dir_all(&args.out_dir)?;
     let out_dir = args.out_dir.canonicalize().unwrap_or(args.out_dir.clone());
     let paths = derive_paths(&out_dir);
+    let timer = StepTimer::new(0, "0_pipeline_prepare", paths.state_dir.clone());
+    let progress = ProgressReporter::new(0, "pipeline_prepare", 4);
+    progress.start(Some("Preparing pipeline inputs".to_string()));
 
     let report = build_airport_index_report(
         &args.db,
@@ -464,10 +734,34 @@ fn prepare_pipeline(args: &PrepareArgs) -> Result<PreparedRun> {
         args.three_by_three_radius,
         args.five_by_five_radius,
     )?;
+    progress.update(
+        1,
+        None,
+        report.airports_missing.len(),
+        Some("Airport index report built".to_string()),
+    );
 
-    fs::write(&paths.jobs_file, serde_json::to_string_pretty(&report.jobs)?)?;
+    fs::write(
+        &paths.jobs_file,
+        serde_json::to_string_pretty(&report.jobs)?,
+    )?;
+    progress.update(
+        2,
+        None,
+        report.airports_missing.len(),
+        Some("Cone jobs written".to_string()),
+    );
     let manifest = build_download_manifest(&report.jobs, &args.url_template);
-    fs::write(&paths.manifest_file, serde_json::to_string_pretty(&manifest)?)?;
+    fs::write(
+        &paths.manifest_file,
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+    progress.update(
+        3,
+        None,
+        report.airports_missing.len(),
+        Some("Download manifest written".to_string()),
+    );
     let plan = build_step_plan(&paths, args)?;
     fs::write(&paths.plan_file, serde_json::to_string_pretty(&plan)?)?;
 
@@ -487,17 +781,46 @@ fn prepare_pipeline(args: &PrepareArgs) -> Result<PreparedRun> {
     println!("Jobs file         : {}", paths.jobs_file.display());
     println!("Manifest file     : {}", paths.manifest_file.display());
     println!("Plan file         : {}", paths.plan_file.display());
+    progress.finish(
+        4,
+        None,
+        report.airports_missing.len(),
+        Some("Pipeline preparation complete".to_string()),
+    );
+    let prepare_timing = timer.finish(
+        Some(report.airports_requested.len()),
+        Some(manifest.tile_count),
+        Some(report.airports_missing.len()),
+        format!(
+            "Prepared pipeline inputs for {} airports and {} tiles",
+            report.airports_found.len(),
+            manifest.tile_count
+        ),
+    )?;
+    write_pipeline_totals(
+        &paths,
+        run_id,
+        &plan.airports,
+        std::slice::from_ref(&prepare_timing),
+    )?;
+    write_run_summary_txt(&paths, run_id, &plan.airports, &[], &[], None)?;
+    sync_artifacts_to_documents(&paths, run_id)?;
 
     Ok(PreparedRun {
         plan,
         paths,
         expected_job_count: report.jobs.len(),
         expected_tile_count: manifest.tile_count,
+        prepare_timing,
     })
 }
 
 fn run_prepare(args: PrepareArgs) -> Result<()> {
-    let _ = prepare_pipeline(&args)?;
+    let run_id = run_id_from_airports(&args.icao);
+    std::env::set_var("BEAVERY_TIMING_RUN_ID", &run_id);
+    std::env::set_var("BEAVERY_TIMING_AIRPORTS", args.icao.join("|"));
+    std::env::set_var("BEAVERY_DATA_ROOT", default_beavery_data_root());
+    let _ = prepare_pipeline(&args, &run_id)?;
     Ok(())
 }
 
@@ -583,6 +906,7 @@ fn write_context_txt(
     lines.push(format!("manifest_file={}", paths.manifest_file.display()));
     lines.push(format!("plan_file={}", paths.plan_file.display()));
     lines.push(format!("state_csv={}", paths.state_csv.display()));
+    lines.push("runtime_policy=rust_first_python_fallback".to_string());
     lines.push(format!(
         "current_step={}",
         current_step.unwrap_or("pipeline_complete")
@@ -665,19 +989,43 @@ fn write_step_sentinel(
     Ok(())
 }
 
-fn run_step_command(step: &PipelineStepPlan) -> Result<()> {
-    let (program, args) = step
-        .command
+fn run_command_vector(step_id: &str, label: &str, command: &[String]) -> Result<()> {
+    let (program, args) = command
         .split_first()
-        .ok_or_else(|| anyhow!("Step {} has an empty command vector", step.id))?;
+        .ok_or_else(|| anyhow!("Step {step_id} has an empty {label} command vector"))?;
     let status = ProcessCommand::new(program)
         .args(args)
         .status()
-        .with_context(|| format!("Failed to launch step {}", step.id))?;
+        .with_context(|| format!("Failed to launch {label} command for step {step_id}"))?;
     if !status.success() {
-        bail!("Step {} failed with status {status}", step.id);
+        bail!("Step {step_id} {label} command failed with status {status}");
     }
     Ok(())
+}
+
+fn run_step_command(step: &PipelineStepPlan) -> Result<()> {
+    match run_command_vector(&step.id, "primary", &step.command) {
+        Ok(()) => Ok(()),
+        Err(primary_error) => {
+            let Some(fallback_command) = &step.fallback_command else {
+                return Err(primary_error);
+            };
+            eprintln!(
+                "[pipeline_runner] Step {} primary command failed: {}. Retrying fallback command.",
+                step.id, primary_error
+            );
+            if let Err(fallback_error) = run_command_vector(&step.id, "fallback", fallback_command)
+            {
+                bail!(
+                    "Step {} failed. Primary error: {}. Fallback error: {}",
+                    step.id,
+                    primary_error,
+                    fallback_error
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 fn count_files_matching(root: &Path, mut predicate: impl FnMut(&Path) -> bool) -> usize {
@@ -720,18 +1068,10 @@ fn is_vrt_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn is_geotiff_list_file(path: &Path) -> bool {
-    if !path
-        .extension()
+fn is_text_file(path: &Path) -> bool {
+    path.extension()
         .and_then(|x| x.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("txt"))
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    path.file_stem()
-        .and_then(|x| x.to_str())
-        .map(|stem| stem.contains("_baseX") && stem.contains("_baseY"))
         .unwrap_or(false)
 }
 
@@ -757,20 +1097,26 @@ fn is_image_ext_pgw_duplicate(path: &Path) -> bool {
 }
 
 fn load_jobs(path: &Path) -> Result<Vec<ConeJob>> {
-    let raw = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let jobs = serde_json::from_str::<Vec<ConeJob>>(&raw)
         .with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(jobs)
 }
 
 fn load_manifest(path: &Path) -> Result<DownloadManifest> {
-    let raw = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let manifest = serde_json::from_str::<DownloadManifest>(&raw)
         .with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(manifest)
 }
 
-fn validate_step_outputs(step_id: &str, prepared: &PreparedRun, args: &PrepareArgs) -> Result<StepMetrics> {
+fn validate_step_outputs(
+    step_id: &str,
+    prepared: &PreparedRun,
+    args: &PrepareArgs,
+) -> Result<StepMetrics> {
     let paths = &prepared.paths;
     let mut metrics = StepMetrics::default();
 
@@ -833,7 +1179,8 @@ fn validate_step_outputs(step_id: &str, prepared: &PreparedRun, args: &PrepareAr
             }
             metrics.input_count = Some(input_count);
             metrics.output_count = Some(output_count);
-            metrics.note = "BRCJ output count matches input count (no double-darkening)".to_string();
+            metrics.note =
+                "BRCJ output count matches input count (no double-darkening)".to_string();
         }
         "4_step_pgw_rust" => {
             let image_count = count_files_matching(&paths.brcj_dir, is_image_file);
@@ -844,7 +1191,8 @@ fn validate_step_outputs(step_id: &str, prepared: &PreparedRun, args: &PrepareAr
                     .unwrap_or(false)
                     && !is_image_ext_pgw_duplicate(p)
             });
-            let duplicate_ext_pgw = count_files_matching(&paths.brcj_dir, is_image_ext_pgw_duplicate);
+            let duplicate_ext_pgw =
+                count_files_matching(&paths.brcj_dir, is_image_ext_pgw_duplicate);
             if duplicate_ext_pgw > 0 {
                 bail!(
                     "Step 4 created {duplicate_ext_pgw} duplicate *.png.pgw/*.jpg.pgw files. Keep --write-image-ext-pgw disabled."
@@ -861,14 +1209,16 @@ fn validate_step_outputs(step_id: &str, prepared: &PreparedRun, args: &PrepareAr
         }
         "5_step_geotiff_to_heaven" => {
             if args.dry_run {
-                metrics.note = "Dry-run: GeoTIFF commands generated but not executed".to_string();
+                metrics.note = "Dry-run: per-cone-cell GeoTIFF commands generated but not executed"
+                    .to_string();
                 return Ok(metrics);
             }
 
-            let expected = prepared.expected_job_count;
+            let jobs = load_jobs(&paths.jobs_file)?;
+            let expected = expected_geotiff_output_count(&jobs)?;
             let tif_count = count_files_matching(&paths.geotiff_dir, is_tiff_file);
             let vrt_count = count_files_matching(&paths.geotiff_dir, is_vrt_file);
-            let list_count = count_files_matching(&paths.geotiff_dir, is_geotiff_list_file);
+            let list_count = count_files_matching(&paths.geotiff_dir, is_text_file);
 
             if tif_count > expected {
                 bail!("Step 5 generated too many GeoTIFFs: {tif_count} > expected {expected}");
@@ -908,44 +1258,72 @@ fn validate_step_outputs(step_id: &str, prepared: &PreparedRun, args: &PrepareAr
             }
             let size = fs::metadata(&paths.imagery_trim_db)?.len() as usize;
             if size == 0 {
-                bail!("Step 7 output is empty: {}", paths.imagery_trim_db.display());
+                bail!(
+                    "Step 7 output is empty: {}",
+                    paths.imagery_trim_db.display()
+                );
             }
             metrics.output_count = Some(1);
             metrics.note = format!("Trimmed DB ready ({} bytes)", size);
         }
         "8_step_merge_tiles" => {
             if !paths.imagery_merge_db.exists() {
-                bail!("Step 8 output missing: {}", paths.imagery_merge_db.display());
+                bail!(
+                    "Step 8 output missing: {}",
+                    paths.imagery_merge_db.display()
+                );
             }
             let size = fs::metadata(&paths.imagery_merge_db)?.len() as usize;
             if size == 0 {
-                bail!("Step 8 output is empty: {}", paths.imagery_merge_db.display());
+                bail!(
+                    "Step 8 output is empty: {}",
+                    paths.imagery_merge_db.display()
+                );
             }
             metrics.output_count = Some(1);
             metrics.note = format!("Merged DB ready ({} bytes)", size);
         }
         "9_step_move_sqls" => {
             let expected_sql = count_files_matching(&paths.imagery_dir, is_sql_artifact);
-            let final_sql = count_files_matching(&paths.final_dir, is_sql_artifact);
             if expected_sql == 0 {
                 bail!(
                     "Step 9 source imagery dir has no SQL artifacts: {}",
                     paths.imagery_dir.display()
                 );
             }
-            if final_sql > expected_sql {
+            if !paths.move_sqls_report.exists() {
                 bail!(
-                    "Step 9 final SQL count too high: {final_sql} > expected {expected_sql} (duplicate move/copy suspected)"
+                    "Step 9 move report missing: {}",
+                    paths.move_sqls_report.display()
                 );
             }
-            if final_sql < expected_sql {
+            let records: Vec<MoveRecord> =
+                serde_json::from_str(&fs::read_to_string(&paths.move_sqls_report)?)?;
+            if records.len() > expected_sql {
                 bail!(
-                    "Step 9 final SQL count too low: {final_sql} < expected {expected_sql}"
+                    "Step 9 moved too many SQL artifacts: {} > expected {}",
+                    records.len(),
+                    expected_sql
                 );
+            }
+            if records.len() < expected_sql {
+                bail!(
+                    "Step 9 moved too few SQL artifacts: {} < expected {}",
+                    records.len(),
+                    expected_sql
+                );
+            }
+            for record in &records {
+                if !Path::new(&record.target).exists() {
+                    bail!("Step 9 target missing after move/copy: {}", record.target);
+                }
             }
             metrics.input_count = Some(expected_sql);
-            metrics.output_count = Some(final_sql);
-            metrics.note = "Final SQL artifact count matches imagery source count".to_string();
+            metrics.output_count = Some(records.len());
+            metrics.note = format!(
+                "Final SQL artifact count matches imagery source count (report: {})",
+                paths.move_sqls_report.display()
+            );
         }
         "10_step_generative_fix" => {
             if !paths.generative_plan.exists() {
@@ -965,7 +1343,10 @@ fn validate_step_outputs(step_id: &str, prepared: &PreparedRun, args: &PrepareAr
     Ok(metrics)
 }
 
-fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
+fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs, run_id: &str) -> Result<()> {
+    let total_steps = prepared.plan.steps.len().max(1);
+    let overall_progress = ProgressReporter::new(0, "pipeline_build", total_steps);
+    overall_progress.start(Some("Pipeline build started".to_string()));
     if args.distributed {
         eprintln!("[WARN] --distributed is not implemented yet; running local execution only.");
     }
@@ -976,14 +1357,14 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
         );
     }
 
-    let run_id = run_id_from_airports(&prepared.plan.airports);
-    let _lock = acquire_run_lock(&prepared.paths, args, &run_id)?;
+    let _lock = acquire_run_lock(&prepared.paths, args, run_id)?;
     let mut completed_steps = Vec::new();
     let mut skipped_steps = Vec::new();
+    let mut step_timings = vec![prepared.prepare_timing.clone()];
 
     append_state_event(
         &prepared.paths,
-        &run_id,
+        run_id,
         &prepared.plan.airports,
         "pipeline",
         "start",
@@ -994,7 +1375,7 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
     )?;
     write_context_txt(
         &prepared.paths,
-        &run_id,
+        run_id,
         &prepared.plan,
         Some("pipeline_start"),
         &completed_steps,
@@ -1003,7 +1384,15 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
         "Pipeline run started",
     )?;
 
-    for step in &prepared.plan.steps {
+    for (step_index, step) in prepared.plan.steps.iter().enumerate() {
+        let completed_steps_count = step_index;
+        overall_progress.update(
+            completed_steps_count,
+            Some(total_steps),
+            0,
+            Some(format!("Starting {}", step.id)),
+        );
+
         if args.dry_run
             && matches!(
                 step.id.as_str(),
@@ -1019,7 +1408,7 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
         {
             append_state_event(
                 &prepared.paths,
-                &run_id,
+                run_id,
                 &prepared.plan.airports,
                 &step.id,
                 "skip",
@@ -1031,7 +1420,7 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
             skipped_steps.push(step.id.clone());
             write_context_txt(
                 &prepared.paths,
-                &run_id,
+                run_id,
                 &prepared.plan,
                 Some(&step.id),
                 &completed_steps,
@@ -1039,6 +1428,27 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
                 None,
                 "Step skipped due to --dry-run",
             )?;
+            overall_progress.update(
+                step_index + 1,
+                Some(total_steps),
+                0,
+                Some(format!("Skipped {} due to --dry-run", step.id)),
+            );
+            write_pipeline_totals(
+                &prepared.paths,
+                run_id,
+                &prepared.plan.airports,
+                &step_timings,
+            )?;
+            write_run_summary_txt(
+                &prepared.paths,
+                run_id,
+                &prepared.plan.airports,
+                &completed_steps,
+                &skipped_steps,
+                None,
+            )?;
+            sync_artifacts_to_documents(&prepared.paths, run_id)?;
             continue;
         }
 
@@ -1052,22 +1462,19 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
             })?;
             append_state_event(
                 &prepared.paths,
-                &run_id,
+                run_id,
                 &prepared.plan.airports,
                 &step.id,
                 "skip",
                 "skipped_done",
                 metrics.input_count,
                 metrics.output_count,
-                &format!(
-                    "Sentinel exists at {}; step skipped",
-                    sentinel.display()
-                ),
+                &format!("Sentinel exists at {}; step skipped", sentinel.display()),
             )?;
             skipped_steps.push(step.id.clone());
             write_context_txt(
                 &prepared.paths,
-                &run_id,
+                run_id,
                 &prepared.plan,
                 Some(&step.id),
                 &completed_steps,
@@ -1075,12 +1482,33 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
                 None,
                 "Step skipped (already completed)",
             )?;
+            overall_progress.update(
+                step_index + 1,
+                Some(total_steps),
+                0,
+                Some(format!("Skipped {} (already completed)", step.id)),
+            );
+            write_pipeline_totals(
+                &prepared.paths,
+                run_id,
+                &prepared.plan.airports,
+                &step_timings,
+            )?;
+            write_run_summary_txt(
+                &prepared.paths,
+                run_id,
+                &prepared.plan.airports,
+                &completed_steps,
+                &skipped_steps,
+                None,
+            )?;
+            sync_artifacts_to_documents(&prepared.paths, run_id)?;
             continue;
         }
 
         append_state_event(
             &prepared.paths,
-            &run_id,
+            run_id,
             &prepared.plan.airports,
             &step.id,
             "start",
@@ -1091,7 +1519,7 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
         )?;
         write_context_txt(
             &prepared.paths,
-            &run_id,
+            run_id,
             &prepared.plan,
             Some(&step.id),
             &completed_steps,
@@ -1100,10 +1528,23 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
             "Step running",
         )?;
 
+        let step_number = step_number_from_id(&step.id);
+        let step_timer = StepTimer::new(
+            step_number,
+            step.id.clone(),
+            prepared.paths.state_dir.clone(),
+        );
         if let Err(err) = run_step_command(step) {
+            overall_progress.fail(
+                step_index,
+                Some(total_steps),
+                1,
+                Some(format!("{} failed: {err}", step.id)),
+            );
+            let _ = step_timer.fail(None, None, Some(1), err.to_string());
             append_state_event(
                 &prepared.paths,
-                &run_id,
+                run_id,
                 &prepared.plan.airports,
                 &step.id,
                 "finish",
@@ -1114,7 +1555,7 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
             )?;
             write_context_txt(
                 &prepared.paths,
-                &run_id,
+                run_id,
                 &prepared.plan,
                 Some(&step.id),
                 &completed_steps,
@@ -1122,15 +1563,36 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
                 Some(&step.id),
                 &format!("Step failed: {err}"),
             )?;
+            write_pipeline_totals(
+                &prepared.paths,
+                run_id,
+                &prepared.plan.airports,
+                &step_timings,
+            )?;
+            write_run_summary_txt(
+                &prepared.paths,
+                run_id,
+                &prepared.plan.airports,
+                &completed_steps,
+                &skipped_steps,
+                Some(&step.id),
+            )?;
+            sync_artifacts_to_documents(&prepared.paths, run_id)?;
             return Err(err);
         }
+        let timing_record = step_timer.finish(
+            None,
+            None,
+            Some(0),
+            format!("Step command runtime captured for {}", step.id),
+        )?;
 
         let metrics = validate_step_outputs(&step.id, prepared, args)
             .with_context(|| format!("Step {} output validation failed", step.id))?;
         write_step_sentinel(&prepared.paths, step, &run_id, &metrics)?;
         append_state_event(
             &prepared.paths,
-            &run_id,
+            run_id,
             &prepared.plan.airports,
             &step.id,
             "finish",
@@ -1140,9 +1602,10 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
             &metrics.note,
         )?;
         completed_steps.push(step.id.clone());
+        step_timings.push(timing_record);
         write_context_txt(
             &prepared.paths,
-            &run_id,
+            run_id,
             &prepared.plan,
             Some(&step.id),
             &completed_steps,
@@ -1150,11 +1613,32 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
             None,
             &metrics.note,
         )?;
+        overall_progress.update(
+            step_index + 1,
+            Some(total_steps),
+            0,
+            Some(format!("Completed {}", step.id)),
+        );
+        write_pipeline_totals(
+            &prepared.paths,
+            run_id,
+            &prepared.plan.airports,
+            &step_timings,
+        )?;
+        write_run_summary_txt(
+            &prepared.paths,
+            run_id,
+            &prepared.plan.airports,
+            &completed_steps,
+            &skipped_steps,
+            None,
+        )?;
+        sync_artifacts_to_documents(&prepared.paths, run_id)?;
     }
 
     append_state_event(
         &prepared.paths,
-        &run_id,
+        run_id,
         &prepared.plan.airports,
         "pipeline",
         "finish",
@@ -1165,7 +1649,7 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
     )?;
     write_context_txt(
         &prepared.paths,
-        &run_id,
+        run_id,
         &prepared.plan,
         None,
         &completed_steps,
@@ -1173,6 +1657,21 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
         None,
         "Pipeline finished successfully",
     )?;
+    write_pipeline_totals(
+        &prepared.paths,
+        run_id,
+        &prepared.plan.airports,
+        &step_timings,
+    )?;
+    write_run_summary_txt(
+        &prepared.paths,
+        run_id,
+        &prepared.plan.airports,
+        &completed_steps,
+        &skipped_steps,
+        None,
+    )?;
+    sync_artifacts_to_documents(&prepared.paths, run_id)?;
 
     println!("Pipeline build complete.");
     println!("Run ID           : {run_id}");
@@ -1181,7 +1680,21 @@ fn execute_pipeline(prepared: &PreparedRun, args: &PrepareArgs) -> Result<()> {
         println!("Skipped steps    : {}", skipped_steps.join(", "));
     }
     println!("State CSV        : {}", prepared.paths.state_csv.display());
-    println!("Context TXT      : {}", prepared.paths.context_txt.display());
+    println!("Totals TXT       : {}", prepared.paths.totals_txt.display());
+    println!(
+        "Documents DATA   : {}",
+        documents_run_root(run_id).display()
+    );
+    println!(
+        "Context TXT      : {}",
+        prepared.paths.context_txt.display()
+    );
+    overall_progress.finish(
+        total_steps,
+        Some(total_steps),
+        0,
+        Some("Pipeline build complete".to_string()),
+    );
     Ok(())
 }
 
@@ -1192,8 +1705,13 @@ fn run_build(args: PrepareArgs) -> Result<()> {
         );
     }
 
-    let prepared = prepare_pipeline(&args)?;
-    execute_pipeline(&prepared, &args)
+    let run_id = run_id_from_airports(&args.icao);
+    std::env::set_var("BEAVERY_TIMING_RUN_ID", &run_id);
+    std::env::set_var("BEAVERY_TIMING_AIRPORTS", args.icao.join("|"));
+    std::env::set_var("BEAVERY_DATA_ROOT", default_beavery_data_root());
+
+    let prepared = prepare_pipeline(&args, &run_id)?;
+    execute_pipeline(&prepared, &args, &run_id)
 }
 
 fn main() -> Result<()> {

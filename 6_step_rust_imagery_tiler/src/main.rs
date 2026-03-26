@@ -4,9 +4,10 @@ use std::process::Command;
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use pipeline_core::{ProgressReporter, StepTimer};
 use serde::Serialize;
 
-use rust_imagery_tiler::{discover_geotiffs, render_command};
+use rust_imagery_tiler::{discover_geotiffs, render_command, validate_sqlite_output_path};
 
 #[derive(Parser, Debug)]
 #[command(name = "rust_imagery_tiler")]
@@ -15,7 +16,7 @@ struct Args {
     #[arg(long)]
     input_dir: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, help = "Output SQLite database path (.sqlite only)")]
     output_db: PathBuf,
 
     #[arg(long, default_value = "imagery-tiler")]
@@ -47,6 +48,13 @@ struct TilerReport {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let timing_root = args
+        .output_db
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let timer = StepTimer::new(6, "6_step_rust_imagery_tiler", timing_root);
+    validate_sqlite_output_path(&args.output_db)?;
     let geotiffs = discover_geotiffs(&args.input_dir, args.recursive);
     if geotiffs.is_empty() {
         return Err(anyhow!(
@@ -54,6 +62,8 @@ fn main() -> Result<()> {
             args.input_dir.display()
         ));
     }
+    let progress = ProgressReporter::new(6, "6_step_rust_imagery_tiler", geotiffs.len().max(1));
+    progress.start(Some("Preparing imagery tiler command".to_string()));
 
     let mut cmd_parts = vec![args.tiler_bin.clone(), "-i".to_string()];
     cmd_parts.extend(geotiffs.iter().map(|p| p.display().to_string()));
@@ -64,10 +74,7 @@ fn main() -> Result<()> {
         args.output_db.display().to_string(),
     ]);
     if let Some(max_zoom) = args.max_zoom_level_limit {
-        cmd_parts.extend([
-            "--max-zoom-level-limit".to_string(),
-            max_zoom.to_string(),
-        ]);
+        cmd_parts.extend(["--max-zoom-level-limit".to_string(), max_zoom.to_string()]);
     }
     if let Some(ref working) = args.working_directory {
         cmd_parts.extend([
@@ -95,7 +102,9 @@ fn main() -> Result<()> {
         process.arg("-f").arg("GEOPACKAGE");
         process.arg("-o").arg(&args.output_db);
         if let Some(max_zoom) = args.max_zoom_level_limit {
-            process.arg("--max-zoom-level-limit").arg(max_zoom.to_string());
+            process
+                .arg("--max-zoom-level-limit")
+                .arg(max_zoom.to_string());
         }
         if let Some(ref working) = args.working_directory {
             process.arg("--working-directory").arg(working);
@@ -105,6 +114,12 @@ fn main() -> Result<()> {
             return Err(anyhow!("imagery-tiler failed with status {status}"));
         }
     }
+    progress.finish(
+        geotiffs.len(),
+        Some(geotiffs.len().max(1)),
+        0,
+        Some("Imagery tiler stage complete".to_string()),
+    );
 
     let report = TilerReport {
         geotiff_count: geotiffs.len(),
@@ -123,5 +138,14 @@ fn main() -> Result<()> {
     println!("input_geotiffs={}", geotiffs.len());
     println!("output_db={}", args.output_db.display());
     println!("report={}", report_path.display());
+    let _ = timer.finish(
+        Some(geotiffs.len()),
+        Some(1),
+        Some(0),
+        format!(
+            "Cesium imagery tiler completed for {} GeoTIFF inputs",
+            geotiffs.len()
+        ),
+    )?;
     Ok(())
 }

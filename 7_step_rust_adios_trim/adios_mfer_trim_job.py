@@ -100,8 +100,14 @@ def copy_schema(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection) -> N
     )
     dst_cur = dst_conn.cursor()
     for type_, name, tbl_name, sql in cur.fetchall():
-        # We just replay the DDL.
-        dst_cur.execute(sql)
+        # We replay the DDL where possible; some internal objects (eg
+        # sqlite_sequence) cannot be recreated and will raise an
+        # OperationalError. Skip those rather than aborting.
+        try:
+            dst_cur.execute(sql)
+        except sqlite3.OperationalError as e:
+            print(f"Skipping DDL for {name}: {e}")
+            continue
     dst_conn.commit()
 
 

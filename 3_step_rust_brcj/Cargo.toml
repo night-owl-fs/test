@@ -10,3 +10,4 @@ rayon = "1.10"
 indicatif = "0.17"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2.5"
+pipeline_core = { path = "../X_pipeline_core" }

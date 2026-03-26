@@ -6,6 +6,8 @@ pub struct PipelineStepPlan {
     pub status: String,
     pub description: String,
     pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

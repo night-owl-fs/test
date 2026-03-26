@@ -1,0 +1,56 @@
+[
+  {
+    "icao": "CYVR",
+    "name": "Vancouver Intl",
+    "base_z": 9,
+    "base_x": 79,
+    "base_y": 174,
+    "grid": 3,
+    "out_z": 13
+  },
+  {
+    "icao": "CYVR",
+    "name": "Vancouver Intl",
+    "base_z": 9,
+    "base_x": 79,
+    "base_y": 174,
+    "grid": 3,
+    "out_z": 14
+  },
+  {
+    "icao": "CYVR",
+    "name": "Vancouver Intl",
+    "base_z": 9,
+    "base_x": 79,
+    "base_y": 174,
+    "grid": 3,
+    "out_z": 15
+  },
+  {
+    "icao": "CYVR",
+    "name": "Vancouver Intl",
+    "base_z": 11,
+    "base_x": 322,
+    "base_y": 700,
+    "grid": 3,
+    "out_z": 16
+  },
+  {
+    "icao": "CYVR",
+    "name": "Vancouver Intl",
+    "base_z": 13,
+    "base_x": 1290,
+    "base_y": 2804,
+    "grid": 5,
+    "out_z": 17
+  },
+  {
+    "icao": "CYVR",
+    "name": "Vancouver Intl",
+    "base_z": 13,
+    "base_x": 1291,
+    "base_y": 2805,
+    "grid": 3,
+    "out_z": 18
+  }
+]

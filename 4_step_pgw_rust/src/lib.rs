@@ -20,12 +20,7 @@ pub fn parse_xy_and_zoom_from_path(path: &Path, forced_zoom: Option<u8>) -> Opti
     } else if parts.len() == 1 {
         // Support standard XYZ layout: .../<z>/<x>/<y>.png
         let y = parts[0].parse::<u32>().ok()?;
-        let x = path
-            .parent()?
-            .file_name()?
-            .to_str()?
-            .parse::<u32>()
-            .ok()?;
+        let x = path.parent()?.file_name()?.to_str()?.parse::<u32>().ok()?;
         let z = path
             .parent()?
             .parent()?

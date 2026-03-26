@@ -109,7 +109,9 @@ fn parse_master_blocks(master_text: &str) -> BTreeMap<String, Vec<Block>> {
 
         if line.len() == 4
             && line.starts_with('K')
-            && line.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            && line
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
         {
             current_airport = Some(line.to_string());
             i += 1;
@@ -136,7 +138,9 @@ fn parse_master_blocks(master_text: &str) -> BTreeMap<String, Vec<Block>> {
                 }
                 if row.len() == 4
                     && row.starts_with('K')
-                    && row.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && row
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
                 {
                     break;
                 }
@@ -162,8 +166,10 @@ fn parse_master_blocks(master_text: &str) -> BTreeMap<String, Vec<Block>> {
             let grid = grid_x.max(grid_y);
             let base_x = unique_x.iter().next().copied().unwrap_or(0);
             let base_y = unique_y.iter().next().copied().unwrap_or(0);
-            let (center_x, center_y) =
-                center.unwrap_or((base_x + grid.saturating_sub(1) / 2, base_y + grid.saturating_sub(1) / 2));
+            let (center_x, center_y) = center.unwrap_or((
+                base_x + grid.saturating_sub(1) / 2,
+                base_y + grid.saturating_sub(1) / 2,
+            ));
 
             out_zooms.sort_unstable();
             out_zooms.dedup();
@@ -249,7 +255,10 @@ fn main() -> Result<()> {
     let airport_list = if args.icao.is_empty() {
         master.keys().cloned().collect::<Vec<_>>()
     } else {
-        args.icao.iter().map(|x| normalize_icao(x)).collect::<Vec<_>>()
+        args.icao
+            .iter()
+            .map(|x| normalize_icao(x))
+            .collect::<Vec<_>>()
     };
 
     let report = build_airport_cone_to_heaven_report(&args.db, &airport_list)?;
@@ -363,11 +372,7 @@ fn main() -> Result<()> {
             for line in &local_mismatch {
                 println!("  - {line}");
             }
-            mismatch_lines.push(format!(
-                "{}: {}",
-                airport.icao,
-                local_mismatch.join(" | ")
-            ));
+            mismatch_lines.push(format!("{}: {}", airport.icao, local_mismatch.join(" | ")));
             report_rows.push(serde_json::json!({
                 "icao": airport.icao,
                 "status": "fail",

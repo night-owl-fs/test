@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "tiff", "webp"] }
 serde_json = "1"
 pipeline_core = { path = "../X_pipeline_core" }
 rayon = "1.10"

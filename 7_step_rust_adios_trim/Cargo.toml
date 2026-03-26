@@ -8,3 +8,4 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
+pipeline_core = { path = "../X_pipeline_core" }

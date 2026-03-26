@@ -9,3 +9,4 @@ regex = "1"
 walkdir = "2"
 rayon = "1"
 anyhow = "1"
+pipeline_core = { path = "../X_pipeline_core" }

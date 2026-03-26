@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use clap::Parser;
+use pipeline_core::{ProgressReporter, StepTimer};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
@@ -42,6 +43,7 @@ fn output_paths(tile_path: &Path, write_image_ext_pgw: bool) -> Vec<PathBuf> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let timer = StepTimer::new(4, "4_step_pgw_rust", args.input.clone());
     if let Some(workers) = args.workers {
         rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
@@ -66,14 +68,26 @@ fn main() -> Result<()> {
     };
 
     let total = files.len();
+    let progress = ProgressReporter::new(4, "4_step_pgw_rust", total.max(1));
+    progress.start(Some("Generating PGW sidecars".to_string()));
     let written = AtomicUsize::new(0);
     let skipped_existing = AtomicUsize::new(0);
     let skipped_bad_name = AtomicUsize::new(0);
     let errors = AtomicUsize::new(0);
+    let processed = AtomicUsize::new(0);
 
     files.par_iter().for_each(|tile_path| {
         let Some((zoom, x, y)) = parse_xy_and_zoom_from_path(tile_path, args.zoom) else {
             skipped_bad_name.fetch_add(1, Ordering::Relaxed);
+            let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+            if done == total || done % 250 == 0 {
+                progress.update(
+                    done,
+                    Some(total.max(1)),
+                    errors.load(Ordering::Relaxed),
+                    Some("Generating PGW sidecars".to_string()),
+                );
+            }
             return;
         };
         let pgw_text = worldfile_text(zoom, x, y);
@@ -99,6 +113,16 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+        if done == total || done % 250 == 0 {
+            progress.update(
+                done,
+                Some(total.max(1)),
+                errors.load(Ordering::Relaxed),
+                Some("Generating PGW sidecars".to_string()),
+            );
+        }
     });
 
     println!("PGW stage complete");
@@ -114,6 +138,23 @@ fn main() -> Result<()> {
         skipped_bad_name.load(Ordering::Relaxed)
     );
     println!("errors={}", errors.load(Ordering::Relaxed));
+    progress.finish(
+        total,
+        Some(total.max(1)),
+        errors.load(Ordering::Relaxed),
+        Some("PGW stage complete".to_string()),
+    );
+    let _ = timer.finish(
+        Some(total),
+        Some(written.load(Ordering::Relaxed)),
+        Some(errors.load(Ordering::Relaxed)),
+        format!(
+            "Generated {} PGW files (skipped_existing={} skipped_bad_name={})",
+            written.load(Ordering::Relaxed),
+            skipped_existing.load(Ordering::Relaxed),
+            skipped_bad_name.load(Ordering::Relaxed)
+        ),
+    )?;
 
     Ok(())
 }

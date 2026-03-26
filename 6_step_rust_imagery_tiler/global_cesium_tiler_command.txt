@@ -13,7 +13,7 @@ imagery-tiler.exe ^
 -f ^
 GEOPACKAGE ^
 -o ^
-"C:\Users\ravery\Desktop\world_global.geopackage" ^
+"C:\Users\ravery\Desktop\world_global.sqlite" ^
 --max-zoom-level-limit ^
 13 ^
 --working-directory ^

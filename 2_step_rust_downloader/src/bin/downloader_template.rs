@@ -13,6 +13,7 @@ use pipeline_core::{
     DownloadManifest, DownloadManifestItem,
 };
 use rayon::prelude::*;
+use step_rust_downloader::{normalize_download_manifest_to_png, write_png_file};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -100,9 +101,10 @@ struct ZoomStats {
 }
 
 fn load_jobs_from_json(path: &Path) -> Result<Vec<ConeJob>> {
-    let text = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let jobs: Vec<ConeJob> =
-        serde_json::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let jobs: Vec<ConeJob> = serde_json::from_str(&text)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(jobs)
 }
 
@@ -130,7 +132,10 @@ fn resolve_jobs(args: &Args) -> Result<(Vec<ConeJob>, Option<Vec<(String, String
 
     let report = build_airport_cone_to_heaven_report(db, &args.icao)?;
     if !report.airports_missing.is_empty() {
-        return Err(anyhow!("ICAOs missing in DB: {:?}", report.airports_missing));
+        return Err(anyhow!(
+            "ICAOs missing in DB: {:?}",
+            report.airports_missing
+        ));
     }
 
     if args.write_specs_txt {
@@ -188,7 +193,12 @@ fn pixel_size_meters(zoom: u32, center_lat_deg: f64) -> f64 {
     meters_per_pixel_equator * center_lat_deg.to_radians().cos()
 }
 
-fn write_precision_log(output: &Path, airport_label: &str, center_lat: f64, stats: &[ZoomStats]) -> Result<()> {
+fn write_precision_log(
+    output: &Path,
+    airport_label: &str,
+    center_lat: f64,
+    stats: &[ZoomStats],
+) -> Result<()> {
     let csv_path = output.join(format!("precision_{}.csv", airport_label));
     let mut file = File::create(&csv_path)
         .with_context(|| format!("Failed to create {}", csv_path.display()))?;
@@ -225,7 +235,13 @@ fn write_precision_log(output: &Path, airport_label: &str, center_lat: f64, stat
     Ok(())
 }
 
-fn write_truth_scripts(output: &Path, airport_label: &str, truth_crs: &str, truth_res: f64, stats: &[ZoomStats]) -> Result<()> {
+fn write_truth_scripts(
+    output: &Path,
+    airport_label: &str,
+    truth_crs: &str,
+    truth_res: f64,
+    stats: &[ZoomStats],
+) -> Result<()> {
     let sh_path = output.join(format!("truth_geotiffs_{}.sh", airport_label));
     let ps1_path = output.join(format!("truth_geotiffs_{}.ps1", airport_label));
 
@@ -237,7 +253,10 @@ fn write_truth_scripts(output: &Path, airport_label: &str, truth_crs: &str, trut
 
     let mut ps1 = File::create(&ps1_path)?;
     writeln!(ps1, "$ErrorActionPreference = 'Stop'")?;
-    writeln!(ps1, "Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)")?;
+    writeln!(
+        ps1,
+        "Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)"
+    )?;
     writeln!(ps1, "")?;
 
     for s in stats {
@@ -331,7 +350,7 @@ fn download_items(args: &Args, manifest: &DownloadManifest) -> Result<()> {
             let Ok(bytes) = resp.bytes() else {
                 continue;
             };
-            if fs::write(&file_path, &bytes).is_ok() {
+            if write_png_file(&file_path, &bytes).is_ok() {
                 ok = true;
                 break;
             }
@@ -341,7 +360,10 @@ fn download_items(args: &Args, manifest: &DownloadManifest) -> Result<()> {
             downloaded.fetch_add(1, Ordering::Relaxed);
         } else {
             failed.fetch_add(1, Ordering::Relaxed);
-            eprintln!("FAILED: z={} x={} y={} url={}", item.z, item.x, item.y, item.url);
+            eprintln!(
+                "FAILED: z={} x={} y={} url={}",
+                item.z, item.x, item.y, item.url
+            );
         }
     });
 
@@ -350,6 +372,36 @@ fn download_items(args: &Args, manifest: &DownloadManifest) -> Result<()> {
     println!("downloaded={}", downloaded.load(Ordering::Relaxed));
     println!("skipped_existing={}", skipped.load(Ordering::Relaxed));
     println!("failed={}", failed.load(Ordering::Relaxed));
+
+    if !args.dry_run {
+        let png_report = normalize_download_manifest_to_png(&args.output, manifest);
+        println!("PNG conversion summary");
+        println!("converted={}", png_report.converted);
+        println!("missing={}", png_report.missing);
+        println!("failed={}", png_report.failed);
+
+        if !png_report.sample_errors.is_empty() {
+            for error in &png_report.sample_errors {
+                eprintln!("PNG conversion issue: {error}");
+            }
+        }
+
+        if png_report.missing > 0 || png_report.failed > 0 {
+            return Err(anyhow!(
+                "PNG conversion incomplete: converted={} missing={} failed={}",
+                png_report.converted,
+                png_report.missing,
+                png_report.failed
+            ));
+        }
+
+        println!(
+            "[PNG-CONVERSION] All {} tile files were converted and verified as PNG in {}",
+            png_report.converted,
+            args.output.display()
+        );
+    }
+
     Ok(())
 }
 
